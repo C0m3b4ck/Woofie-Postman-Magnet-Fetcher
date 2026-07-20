@@ -1,0 +1,34 @@
+marvel
+disney
+netflix
+hbo
+paramount
+warner
+universal
+sony
+pixar
+lucasfilm
+20th century
+fox
+columbia
+mgm
+amazon
+apple
+hulu
+crunchyroll
+funimation
+blizzard
+riot games
+ea games
+ubisoft
+rockstar
+activision
+konami
+capcom
+square enix
+bandai
+nintendo
+sega
+microsoft
+adobe
+microsoft office

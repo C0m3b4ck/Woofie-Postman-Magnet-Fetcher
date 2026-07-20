@@ -1,0 +1,10 @@
+guns
+explosives
+drugs
+narcotics
+weapons
+bomb
+poison
+firearm
+ammunition
+knives
