@@ -386,7 +386,7 @@ def check_disk_limit(size_gb):
 # ///////////// USER INTERACTION ///////////////////
 def greet():
     global dog_ascii
-    string_to_print = pyfiglet.figlet_format("Postman Magnet Fetcher", font="slant")
+    string_to_print = pyfiglet.figlet_format("Woofie I2P Postman Magnet Fetcher", font="slant")
     ascii_brightgreen(string_to_print)
     ascii_brightgreen(dog_ascii)
     string_to_print = pyfiglet.figlet_format("By C0m3b4ck")

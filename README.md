@@ -1,6 +1,13 @@
-# I2P Postman Magnet Fetcher
+```
+            .--~~,__
+:-....,-------`~~'._.'
+`-,,,  ,_      ;'~U'
+ _,-' ,'`-__; '--.
+(_/'~~      ''''(;
+```
+# Woofie Postman I2P Magnet Fetcher
 
-A command-line tool that behaves like a CLI browser for Postman - downloads each page, gets magnet links, allows user to select which ones they want.
+Woofie is a command-line tool that behaves like a CLI browser for Postman - downloads each page, gets magnet links, allows user to select which ones they want.
 **It is not an invasive, agressive crawler, but a Lynx-esq friendly Postman interface. It behaves exactly like a browser would.**
 
 The script was made for a better Postman experience. Please do not abuse it and be careful what you're downloading.
