@@ -5,6 +5,7 @@ import sys
 import json
 import time
 import atexit
+import argparse
 import pyfiglet
 import urllib.parse
 import urllib.request
@@ -31,6 +32,10 @@ def print_warning(msg):
 
 def print_info(msg):
 	print(f"{BLUE}{msg}{RESET}")
+
+def print_verbose(msg):
+	if verbose:
+		print(f"{DARK_PURPLE}[DEBUG] {msg}{RESET}")
 
 def input_blue(prompt):
 	return input(f"{BLUE}{prompt}{RESET}")
@@ -87,6 +92,7 @@ token = ""
 search = ""
 http_proxy = "127.0.0.1:4444"
 DEFAULT_PROXY = "127.0.0.1:4444"
+verbose = False
 NOT_WANTED_FILE = "not_wanted_magnets.txt"
 CONFIG_FILE = "config.json"
 DANGER_WORDS_FILE = "danger_words.txt"
@@ -95,6 +101,120 @@ TEMP_FILES = ["lander.html", "post_response.html", "fetched_page.html"]
 I2PSNARK_URL = "http://127.0.0.1:7657/i2psnark/"
 DEFAULT_DANGER_WORDS = ["guns", "explosives", "drugs", "narcotics", "weapons", "bomb", "poison", "firearm", "ammunition", "knives"]
 DEFAULT_COPYRIGHT_WORDS = ["marvel", "disney", "netflix", "hbo", "paramount", "warner", "universal", "sony", "pixar", "lucasfilm", "20th century fox", "columbia", "mgm", "amazon", "apple", "hulu", "crunchyroll", "funimation", "blizzard", "riot games", "ea games", "ubisoft", "rockstar", "activision", "konami", "capcom", "square enix", "bandai", "nintendo", "sega", "microsoft", "adobe", "microsoft office"]
+
+cli_args = None
+
+def parse_args():
+	global cli_args, verbose
+	parser = argparse.ArgumentParser(
+		description="Woofie I2P Postman Magnet Fetcher - fetch and add torrents from Postman tracker to i2psnark",
+		epilog="If CLI arguments are provided, they override config.json and skip interactive prompts for those settings."
+	)
+	parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose/debug output')
+	parser.add_argument('--url', metavar='URL', help='Postman tracker URL (default: http://tracker2.postman.i2p)')
+	parser.add_argument('--proxy', metavar='HOST:PORT', help='HTTP proxy for I2P (default: 127.0.0.1:4444)')
+	parser.add_argument('--i2psnark-url', metavar='URL', help='i2psnark web interface URL (default: http://127.0.0.1:7657/i2psnark/)')
+	parser.add_argument('-c', '--category', metavar='NAME', help=f'Category name or number (choices: 1-{len(category_list)})')
+	parser.add_argument('-l', '--limit', type=int, metavar='N', help='Torrents per page')
+	parser.add_argument('-s', '--search', metavar='TERM', help='Search term')
+	parser.add_argument('--page', type=int, metavar='N', help='Starting page number (default: 1)')
+	parser.add_argument('--show-per-page', type=int, metavar='N', help='Results shown per page')
+	parser.add_argument('--view', metavar='NAME', help='View type (default: Main)')
+	parser.add_argument('--lang', metavar='NAME', help='Language name or number')
+	parser.add_argument('--order-by', metavar='NAME', help='Order by option name or number')
+	parser.add_argument('--last-active', metavar='NAME', help='Last active filter name or number')
+	parser.add_argument('--min-wait', type=int, metavar='SEC', help='Min wait time between pages (default: 10)')
+	parser.add_argument('--max-wait', type=int, metavar='SEC', help='Max wait time between pages (default: 30)')
+	parser.add_argument('--disk-limit', type=float, metavar='GB', help='Disk size limit in GB')
+	parser.add_argument('--hands-on', action='store_true', default=None, help='Enable hands-on mode (override danger filter)')
+	parser.add_argument('--no-hands-on', action='store_true', help='Disable hands-on mode')
+	parser.add_argument('--add-all', action='store_true', default=None, help='Enable add-all mode (auto-add all magnets)')
+	parser.add_argument('--no-add-all', action='store_true', help='Disable add-all mode')
+	parser.add_argument('--danger-filter', action='store_true', default=None, help='Enable danger filter')
+	parser.add_argument('--no-danger-filter', action='store_true', help='Disable danger filter')
+	parser.add_argument('--copyright-filter', action='store_true', default=None, help='Enable copyright filter')
+	parser.add_argument('--no-copyright-filter', action='store_true', help='Disable copyright filter')
+	parser.add_argument('--no-config', action='store_true', help='Skip loading config.json')
+	parser.add_argument('--save', action='store_true', help='Save settings to config.json after run')
+	cli_args = parser.parse_args()
+	verbose = cli_args.verbose
+
+def apply_cli_args():
+	global postman_url, http_proxy, I2PSNARK_URL, selected_category, limit, search
+	global start_page, show_per_page, view, language_num, orderby_num, lastactive_num
+	global min_waittime, max_waittime, disk_limit_gb, filter_disk_limit
+	global hands_on_mode, add_all_mode, filter_danger, filter_copyright
+	if cli_args.url:
+		postman_url = normalize_url(cli_args.url)
+	if cli_args.proxy:
+		http_proxy = cli_args.proxy
+	if cli_args.i2psnark_url:
+		I2PSNARK_URL = cli_args.i2psnark_url
+	if cli_args.category is not None:
+		cat_str = cli_args.category.strip()
+		if cat_str.isdigit():
+			num = int(cat_str)
+			if 1 <= num <= len(category_list):
+				selected_category = num
+		elif cat_str.lower() in category_list:
+			selected_category = category_list.index(cat_str.lower()) + 1
+	if cli_args.limit is not None:
+		limit = cli_args.limit
+	if cli_args.search is not None:
+		search = cli_args.search
+	if cli_args.page is not None:
+		start_page = max(1, cli_args.page)
+	if cli_args.show_per_page is not None:
+		show_per_page = cli_args.show_per_page
+	if cli_args.view is not None:
+		view = cli_args.view
+	if cli_args.lang is not None:
+		lang_str = cli_args.lang.strip()
+		if lang_str.isdigit():
+			num = int(lang_str)
+			if 0 <= num < len(language_list):
+				language_num = language_map[num]
+		elif lang_str.lower() in language_list:
+			language_num = language_map[language_list.index(lang_str.lower())]
+	if cli_args.order_by is not None:
+		ob_str = cli_args.order_by.strip()
+		if ob_str.isdigit():
+			num = int(ob_str)
+			if 0 <= num < len(orderby_list):
+				orderby_num = orderby_map[num]
+		elif ob_str.lower() in orderby_list:
+			orderby_num = orderby_map[orderby_list.index(ob_str.lower())]
+	if cli_args.last_active is not None:
+		la_str = cli_args.last_active.strip()
+		if la_str.isdigit():
+			num = int(la_str)
+			if 0 <= num < len(lastactive_list):
+				lastactive_num = lastactive_map[num]
+		elif la_str.lower() in lastactive_list:
+			lastactive_num = lastactive_map[lastactive_list.index(la_str.lower())]
+	if cli_args.min_wait is not None:
+		min_waittime = cli_args.min_wait
+	if cli_args.max_wait is not None:
+		max_waittime = cli_args.max_wait
+	if cli_args.disk_limit is not None:
+		disk_limit_gb = cli_args.disk_limit
+		filter_disk_limit = True
+	if cli_args.hands_on:
+		hands_on_mode = True
+	elif cli_args.no_hands_on:
+		hands_on_mode = False
+	if cli_args.add_all:
+		add_all_mode = True
+	elif cli_args.no_add_all:
+		add_all_mode = False
+	if cli_args.danger_filter:
+		filter_danger = True
+	elif cli_args.no_danger_filter:
+		filter_danger = False
+	if cli_args.copyright_filter:
+		filter_copyright = True
+	elif cli_args.no_copyright_filter:
+		filter_copyright = False
 
 def cleanup():
 	for f in TEMP_FILES:
@@ -155,9 +275,28 @@ def apply_config(settings):
 		orderby_num = settings["orderby_num"]
 	if "lastactive_num" in settings:
 		lastactive_num = settings["lastactive_num"]
+	if "verbose" in settings:
+		verbose = settings["verbose"]
 
 def get_router_type():
 	global I2PSNARK_URL
+	if cli_args and cli_args.no_config:
+		print_info("Skipping config.json (--no-config)")
+		if not (cli_args and cli_args.i2psnark_url):
+			print_info("Select your i2p router type:")
+			print_info("  1) Official I2P router (default port 7657)")
+			print_info("  2) I2P standalone (default port 8002)")
+			while True:
+				choice = input_blue("Choice (1/2): ").strip()
+				if choice == "1":
+					I2PSNARK_URL = "http://127.0.0.1:7657/i2psnark/"
+					break
+				elif choice == "2":
+					I2PSNARK_URL = "http://127.0.0.1:8002/i2psnark/"
+					break
+				else:
+					print_error("Invalid choice. Enter 1 or 2.")
+		return False
 	settings = load_config()
 	if settings:
 		choice = input_blue("Load saved settings from config.json? y/n: ").strip().lower()
@@ -208,7 +347,8 @@ def prompt_save_settings():
 			"hands_on_mode": hands_on_mode,
 			"add_all_mode": add_all_mode,
 			"min_waittime": min_waittime,
-			"max_waittime": max_waittime
+			"max_waittime": max_waittime,
+			"verbose": verbose
 		}
 		save_config(settings)
 		print_success("Settings saved to config.json")
@@ -415,6 +555,8 @@ def greet():
     time.sleep(2)
     print_warning("Postman forbids using scripts on the site, therefore be EXTRA RESPECTFUL !!!")
     time.sleep(2)
+    if verbose:
+        print_info("Verbose mode enabled (use --verbose or -v flag)")
 def goodbye():
     global dog_ascii
     string_to_print = pyfiglet.figlet_format("Goodbye", font="slant")
@@ -557,6 +699,15 @@ def get_start_page():
 		print_error("Page number must be at least 1.")
 		start_page = 1
 	torrent_number = (start_page - 1) * limit
+def get_verbose():
+	global verbose
+	choice = input_blue("Enable verbose/debug output? y/n: ").strip().lower()
+	if choice in ('y', 'yes'):
+		verbose = True
+		print_success("Verbose output enabled.")
+	elif choice in ('n', 'no'):
+		verbose = False
+		print_info("Verbose output disabled.")
 def load_not_wanted():
 	global not_wanted_magnets, filter_not_wanted
 	if not os.path.exists(NOT_WANTED_FILE):
@@ -594,43 +745,89 @@ def out_allvars():
 	print_info(f"  Hands-on mode: {'ON (can override danger filter)' if hands_on_mode else 'OFF'}")
 	print_info(f"  Add all mode: {'ON (auto-add all magnets)' if add_all_mode else 'OFF'}")
 	print_info(f"  Wait time: {min_waittime}-{max_waittime}s between pages")
+	print_info(f"  Verbose: {'ON' if verbose else 'OFF'}")
 	print_info("========================")
 def get_user_input():
 	settings_loaded = get_router_type()
+	if cli_args:
+		apply_cli_args()
 	if not settings_loaded:
-		get_postman_url()
-		get_category()
-		get_show_per_page()
-		get_limit_per_page()
-		get_search_term()
-		get_start_page()
-		get_view()
-		get_lang()
-		get_orderby()
-		get_lastactive()
-		get_httpproxy()
-		get_danger_filter()
-		get_copyright_filter()
-		get_disk_limit()
-		get_hands_on_mode()
-		get_add_all_mode()
-		get_waittime()
+		if not (cli_args and cli_args.url):
+			get_postman_url()
+		if not (cli_args and cli_args.category):
+			get_category()
+		if not (cli_args and cli_args.show_per_page):
+			get_show_per_page()
+		if not (cli_args and cli_args.limit):
+			get_limit_per_page()
+		if not (cli_args and cli_args.search is not None):
+			get_search_term()
+		if not (cli_args and cli_args.page):
+			get_start_page()
+		if not (cli_args and cli_args.view):
+			get_view()
+		if not (cli_args and cli_args.lang):
+			get_lang()
+		if not (cli_args and cli_args.order_by):
+			get_orderby()
+		if not (cli_args and cli_args.last_active):
+			get_lastactive()
+		if not (cli_args and cli_args.proxy):
+			get_httpproxy()
+		if not (cli_args and (cli_args.danger_filter or cli_args.no_danger_filter)):
+			get_danger_filter()
+		if not (cli_args and (cli_args.copyright_filter or cli_args.no_copyright_filter)):
+			get_copyright_filter()
+		if not (cli_args and cli_args.disk_limit):
+			get_disk_limit()
+		if not (cli_args and (cli_args.hands_on or cli_args.no_hands_on)):
+			get_hands_on_mode()
+		if not (cli_args and (cli_args.add_all or cli_args.no_add_all)):
+			get_add_all_mode()
+		if not (cli_args and (cli_args.min_wait or cli_args.max_wait)):
+			get_waittime()
+		if not (cli_args and cli_args.verbose):
+			get_verbose()
 	load_not_wanted()
 	out_allvars()
 	prompt_save_settings()
 # //////////// NETWORKING ///////////////
+def normalize_proxy(url):
+	if not url.startswith(("http://", "https://")):
+		return "http://" + url
+	return url
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+	def redirect_request(self, req, fp, code, msg, headers, newurl):
+		from urllib.parse import urlparse, urlunparse
+		parsed = urlparse(newurl)
+		if parsed.hostname and '.b32.i2p' in parsed.hostname:
+			orig = urlparse(postman_url)
+			fixed = urlunparse(parsed._replace(netloc=orig.netloc, scheme=orig.scheme))
+			print_warning(f"Redirect ({code}) to dead .b32.i2p address rewritten to: {fixed}")
+			return urllib.request.Request(fixed, headers=req.headers, method=req.get_method())
+		print_info(f"Following redirect ({code}) to: {newurl}")
+		return urllib.request.Request(newurl, headers=req.headers, method=req.get_method())
+
 def download_page(url, file_name):
-	proxy_url = http_proxy
-	if not proxy_url.startswith("http://"):
-		proxy_url = "http://" + proxy_url
+	proxy_url = normalize_proxy(http_proxy)
+	print_verbose(f"Proxy: {proxy_url}")
+	print_verbose(f"Request: {url}")
 	i2p_proxy = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
-	opener = urllib.request.build_opener(i2p_proxy)
+	opener = urllib.request.build_opener(i2p_proxy, NoRedirectHandler)
 	try:
-		response = opener.open(url, timeout=60)
+		start_time = time.time()
+		response = opener.open(url, timeout=120)
+		elapsed = time.time() - start_time
+		print_verbose(f"Response: {response.status} {response.reason} ({elapsed:.1f}s)")
+		print_verbose(f"Response headers: {dict(response.headers)}")
 		with open(file_name, 'wb') as f:
 			f.write(response.read())
 		return True
 	except urllib.error.HTTPError as e:
+		elapsed = time.time() - start_time
+		print_verbose(f"HTTPError after {elapsed:.1f}s: {e.code} {e.reason}")
+		print_verbose(f"Response headers: {dict(e.headers)}")
 		if e.code == 503:
 			print_error("Server returned 503 - you are being throttled or the tracker is overloaded.")
 			print_error("Try again in a few minutes, or increase your wait time between requests.")
@@ -644,16 +841,20 @@ def download_page(url, file_name):
 	except urllib.error.URLError as e:
 		print_error(f"Could not connect to tracker: {e.reason}")
 		print_error("Make sure your proxy is running and the URL is correct.")
+		print_verbose(f"Proxy: {proxy_url}, Target: {url}")
 		return False
 	except IOError as e:
 		print_error(f"Network error: {e}")
+		print_verbose(f"Proxy: {proxy_url}, Target: {url}")
 		return False
 def authenticate_form_token():
 	global token
 	global http_proxy
 	proxies = {
-		"http"  : http_proxy,
+		"http"  : normalize_proxy(http_proxy),
+		"https" : normalize_proxy(http_proxy),
 	}
+	print_verbose(f"Session proxies: {proxies}")
 	session = requests.Session()
 	session.proxies = proxies
 	print_info("---> Getting form token... ")
@@ -679,8 +880,35 @@ def authenticate_form_token():
 					url_tok = f"{postman_url}/index.php?action=Enter"
 					data_tok = {'formtoken' : token}
 
-					print_info(f"Submitting token to: {url_tok}")
-					x = session.post(url_tok, data = data_tok, timeout=60)
+					print_verbose(f"Token POST: {url_tok}")
+					start_time = time.time()
+					x = session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
+					print_verbose(f"Token response: {x.status_code} ({time.time() - start_time:.1f}s)")
+					print_verbose(f"Token response headers: {dict(x.headers)}")
+
+					from urllib.parse import urlparse, urlunparse, urljoin
+					max_redirects = 5
+					redirect_count = 0
+					while x.status_code in (301, 302, 303, 307, 308) and redirect_count < max_redirects:
+						redirect_count += 1
+						redirect_url = x.headers.get('Location', '')
+						redirect_url = urljoin(x.url, redirect_url)
+						print_verbose(f"Redirect ({x.status_code}) Location: {redirect_url}")
+						parsed = urlparse(redirect_url)
+						if parsed.hostname and '.b32.i2p' in parsed.hostname:
+							orig = urlparse(postman_url)
+							url_tok = urlunparse(parsed._replace(netloc=orig.netloc, scheme=orig.scheme))
+							print_warning(f"Redirect to dead .b32.i2p rewritten to: {url_tok}")
+							start_time = time.time()
+							x = session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
+							print_verbose(f"Retry response: {x.status_code} ({time.time() - start_time:.1f}s)")
+						else:
+							print_info(f"Following redirect ({x.status_code}) to: {redirect_url}")
+							start_time = time.time()
+							x = session.post(redirect_url, data = data_tok, timeout=120, allow_redirects=False)
+							print_verbose(f"Redirect response: {x.status_code} ({time.time() - start_time:.1f}s)")
+					if redirect_count >= max_redirects and x.status_code in (301, 302, 303, 307, 308):
+						print_error(f"Too many redirects ({max_redirects}), giving up.")
 
 					if x.status_code == 200:
 						print_success("Token submitted successfully (200)")
@@ -857,8 +1085,10 @@ def add_magnet_to_i2psnark(magnet, nonce):
 		"nofilter_newDir": "",
 	}
 	post_url = I2PSNARK_URL + "_post"
+	print_verbose(f"i2psnark POST: {post_url}")
 	try:
 		response = requests.post(post_url, data=multipart, timeout=30)
+		print_verbose(f"i2psnark response: {response.status_code}")
 		if response.status_code == 200:
 			return True
 		else:
@@ -888,8 +1118,10 @@ def add_to_i2psnark():
 		print_warning("Aborted.")
 		return
 	print_info("Connecting to i2psnark...")
+	print_verbose(f"i2psnark GET: {I2PSNARK_URL}")
 	try:
 		response = requests.get(I2PSNARK_URL, timeout=30)
+		print_verbose(f"i2psnark response: {response.status_code}")
 		response.raise_for_status()
 	except requests.RequestException as e:
 		print_error(f"Cannot reach i2psnark at {I2PSNARK_URL}")
@@ -920,6 +1152,7 @@ def add_to_i2psnark():
 		print_info(f"Saved {len(not_add)} rejected magnet(s) to {NOT_WANTED_FILE}")
 	# /////////// MAIN FUNCTION /////////////
 if __name__ == "__main__":
+	parse_args()
 	greet()
 
 	get_user_input()
@@ -929,6 +1162,33 @@ if __name__ == "__main__":
 		sys.exit(1)
 	magnets_from_page()
 	add_to_i2psnark()
+
+	if cli_args and cli_args.save:
+		settings = {
+			"tracker_url": postman_url,
+			"http_proxy": http_proxy,
+			"i2psnark_url": I2PSNARK_URL,
+			"selected_category": selected_category,
+			"show_per_page": show_per_page,
+			"limit": limit,
+			"view": view,
+			"language_num": language_num,
+			"orderby_num": orderby_num,
+			"lastactive_num": lastactive_num,
+			"filter_danger": filter_danger,
+			"danger_words": danger_words,
+			"filter_copyright": filter_copyright,
+			"copyright_words": copyright_words,
+			"filter_disk_limit": filter_disk_limit,
+			"disk_limit_gb": disk_limit_gb,
+			"hands_on_mode": hands_on_mode,
+			"add_all_mode": add_all_mode,
+			"min_waittime": min_waittime,
+			"max_waittime": max_waittime,
+			"verbose": verbose
+		}
+		save_config(settings)
+		print_success("Settings saved to config.json (--save)")
 
 	# program closure
 	goodbye()
