@@ -966,6 +966,15 @@ def magnets_from_page():
 	print_info("---> Getting page: " + page_url)
 	if not download_page(page_url, "fetched_page.html"):
 		return
+	page_content = open('fetched_page.html', 'r').read()
+	page_lower = page_content.lower()
+	service_errors = ['service unavailable', 'service temporarily unavailable', 'access denied', 'forbidden', 'not found', 'error', 'no torrents', 'no results']
+	for err in service_errors:
+		if err in page_lower and 'magnet:?xt' not in page_lower:
+			print_error(f"Tracker returned error page: '{err}' detected in response (HTTP 200 but content is an error)")
+			print_error("The tracker may be overloaded, blocking your request, or the session expired.")
+			print_verbose(f"Check fetched_page.html for full response content.")
+			return
 	with open(r'fetched_page.html', 'r') as fp:
 		for line_num, row in enumerate(fp):
 			searchstring = ('magnet:?xt')
