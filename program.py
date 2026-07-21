@@ -48,7 +48,7 @@ dog_ascii = r"""
  _,-' ,'`-__; '--.
 (_/'~~      ''''(;
 """
-postman_url = ""
+postman_url = "http://tracker2.postman.i2p"
 category_list = ["movies", "music", "tv", "games", "apps", "misc", "pictures", "anime", "comics", "social media", "podcasts", "books", "audiobooks", "ebooks", "course/lesson", "essay/op-ed", "cad/3d-printing", "music vid", "pr0n", "documentary", "leaked documents", "conspiracy", "religious content"]
 selected_category = 0
 show_per_page = 0
@@ -56,13 +56,13 @@ limit = 0
 view = "Main"
 orderby_map = [-1, 1, 2, 3, 4, 5, 6, 7]
 orderby_list = ["descending", "time added", "downloads", "hits", "comments", "swarmsize", "rating", "torrentsize"]
-orderby_num = None
+orderby_num = -1
 lastactive_map = [-1, 1, 2, 3, 4, 5, 6, 7, 8]
 lastactive_list = ["active torrents", "active last 24h", "active last 48h", "active last week", "active last 2weeks", "w/o seeders", "abandoned torrents", "cross seed torrents", "all torrents"]
-lastactive_num = None
+lastactive_num = -1
 language_map = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
 language_list = ["any language", "english", "german", "french", "spanish", "potuguese", "dutch", "russian", "swedish", "italian", "chinese", "finnish", "japanese", "turkish", "korean", "danish", "norwegian", "polish", "hindi"]
-language_num = None
+language_num = -1
 seed = None
 from_waittime = 0
 to_waittime = 0
@@ -116,7 +116,7 @@ def save_config(settings):
 def apply_config(settings):
 	global postman_url, http_proxy, I2PSNARK_URL, filter_danger, danger_words, filter_copyright, copyright_words, filter_disk_limit, disk_limit_gb, hands_on_mode, add_all_mode, min_waittime, max_waittime
 	if "tracker_url" in settings:
-		postman_url = settings["tracker_url"]
+		postman_url = normalize_url(settings["tracker_url"])
 	if "http_proxy" in settings:
 		http_proxy = settings["http_proxy"]
 	if "i2psnark_url" in settings:
@@ -141,6 +141,20 @@ def apply_config(settings):
 		min_waittime = settings["min_waittime"]
 	if "max_waittime" in settings:
 		max_waittime = settings["max_waittime"]
+	if "selected_category" in settings:
+		selected_category = settings["selected_category"]
+	if "show_per_page" in settings:
+		show_per_page = settings["show_per_page"]
+	if "limit" in settings:
+		limit = settings["limit"]
+	if "view" in settings:
+		view = settings["view"]
+	if "language_num" in settings:
+		language_num = settings["language_num"]
+	if "orderby_num" in settings:
+		orderby_num = settings["orderby_num"]
+	if "lastactive_num" in settings:
+		lastactive_num = settings["lastactive_num"]
 
 def get_router_type():
 	global I2PSNARK_URL
@@ -178,6 +192,13 @@ def prompt_save_settings():
 			"tracker_url": postman_url,
 			"http_proxy": http_proxy,
 			"i2psnark_url": I2PSNARK_URL,
+			"selected_category": selected_category,
+			"show_per_page": show_per_page,
+			"limit": limit,
+			"view": view,
+			"language_num": language_num,
+			"orderby_num": orderby_num,
+			"lastactive_num": lastactive_num,
 			"filter_danger": filter_danger,
 			"danger_words": danger_words,
 			"filter_copyright": filter_copyright,
@@ -400,17 +421,20 @@ def goodbye():
     ascii_brightgreen(string_to_print)
     ascii_brightgreen(dog_ascii)
 
+def normalize_url(url):
+	return url.rstrip('/')
+
 def get_postman_url():
 	global postman_url
-	print_info(f"/// Current tracker URL: {postman_url or 'tracker2.postman.i2p/'} ///")
-	postman_url = input_blue("Input Postman Tracker URL (empty to keep current): ")
-	if postman_url == "":
-		if not globals().get('postman_url'):
-			postman_url = "http://tracker2.postman.i2p/"
+	current = postman_url or 'http://tracker2.postman.i2p'
+	print_info(f"/// Current tracker URL: {current} ///")
+	user_input = input_blue("Input Postman Tracker URL (empty to keep current): ").strip()
+	if user_input == "":
 		return
-	if not postman_url.startswith(("http://", "https://")):
+	if not user_input.startswith(("http://", "https://")):
 		print_error("URL must start with http:// or https:// !!!")
-		postman_url = "http://tracker2.postman.i2p/"
+		return
+	postman_url = normalize_url(user_input)
 def get_category():
 	global selected_category
 	print_info("Available categories:")
@@ -627,31 +651,35 @@ def download_page(url, file_name):
 def authenticate_form_token():
 	global token
 	global http_proxy
-	# proxy set for requests
 	proxies = {
 		"http"  : http_proxy,
 	}
 	session = requests.Session()
 	session.proxies = proxies
 	print_info("---> Getting form token... ")
+	print_info(f"Downloading landing page from: {postman_url}")
 	if not download_page(postman_url, "lander.html"):
-		return
+		print_error("Failed to download landing page. Cannot authenticate.")
+		print_error("Check your proxy, tracker URL, and network connection.")
+		return False
 	print_success("Downloaded landing page")
 	print_info("Opening lander.html in order to find token.")
+	token_found = False
 	try:
 		with open(r'lander.html', 'r') as fp:
 			for line_num, row in enumerate(fp):
-				searchstring = ('name="formtoken" value="')  # String to search for
+				searchstring = ('name="formtoken" value="')
 				if row.find(searchstring) != -1:
+					token_found = True
 					print_success('Found form token! :)')
 					print_info('Line Number: ' + str(line_num))
 					token = row.split('value="')[1].split('"')[0]
 					print_success("FORMTOKEN: " + token)
 
-					# send POST request here ?/action=Enter
-					url_tok = postman_url + 'index.php?action=Enter'
+					url_tok = f"{postman_url}/index.php?action=Enter"
 					data_tok = {'formtoken' : token}
 
+					print_info(f"Submitting token to: {url_tok}")
 					x = session.post(url_tok, data = data_tok, timeout=60)
 
 					if x.status_code == 200:
@@ -669,17 +697,27 @@ def authenticate_form_token():
 						}
 						msg = http_errors.get(x.status_code, f"HTTP {x.status_code}")
 						print_error(f"Token submission failed: {msg}")
-						print_warning("The script may not work correctly. Consider waiting and retrying.")
+						print_error(f"Response status: {x.status_code}, URL: {x.url}")
+						print_error("The script cannot continue without a valid token session.")
 						with open('post_response.html', 'w') as f:
 							f.write(x.text)
-						return
+						return False
 					with open('post_response.html', 'w') as f:
 						f.write(x.text)
 					break
 	except requests.RequestException as e:
 		print_error(f"Network error during token submission: {e}")
+		print_error("Check your proxy connection and tracker availability.")
+		return False
 	except IOError as e:
 		print_error(f"Could not read lander.html: {e}")
+		return False
+	if not token_found:
+		print_error("No form token found in landing page HTML.")
+		print_error("The tracker page structure may have changed, or the page was empty/error.")
+		print_error("Check lander.html for the actual response content.")
+		return False
+	return True
 def magnets_from_page():
 	global postman_url, torrent_number, to_add, not_add, current_selection_sizes
 	magnets = []
@@ -885,8 +923,10 @@ if __name__ == "__main__":
 	greet()
 
 	get_user_input()
-	# some networking calls here
-	authenticate_form_token()
+	if not authenticate_form_token():
+		print_error("Authentication failed. Exiting.")
+		goodbye()
+		sys.exit(1)
 	magnets_from_page()
 	add_to_i2psnark()
 
