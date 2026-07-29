@@ -7,6 +7,12 @@
 ```
 # Woofie Postman I2P Magnet Fetcher
 
+> **LEGAL DISCLAIMER**
+> This tool is provided for educational and research purposes only. Downloading copyrighted material without authorization is illegal in most jurisdictions. The copyright filter is enabled by default to help prevent accidental infringement, but it is keyword-based and not comprehensive.
+>
+> **You are solely responsible for ensuring your use complies with all applicable laws.**
+> The author does not condone piracy or copyright infringement. Only use this tool to access content you have legal rights to download.
+
 Woofie is a command-line tool that behaves like a CLI browser for Postman - downloads each page, gets magnet links, allows user to select which ones they want.
 **It is not an invasive, agressive crawler, but a Lynx-esq friendly Postman interface. It behaves exactly like a browser would.**
 
