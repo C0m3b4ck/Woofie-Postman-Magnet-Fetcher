@@ -8,8 +8,6 @@ import atexit
 import argparse
 import pyfiglet
 import urllib.parse
-import urllib.request
-import urllib.error
 import requests
 
 # ///////////// ANSI COLORS ///////////////////
@@ -103,6 +101,8 @@ DEFAULT_DANGER_WORDS = ["guns", "explosives", "drugs", "narcotics", "weapons", "
 DEFAULT_COPYRIGHT_WORDS = ["marvel", "disney", "netflix", "hbo", "paramount", "warner", "universal", "sony", "pixar", "lucasfilm", "20th century fox", "columbia", "mgm", "amazon", "apple", "hulu", "crunchyroll", "funimation", "blizzard", "riot games", "ea games", "ubisoft", "rockstar", "activision", "konami", "capcom", "square enix", "bandai", "nintendo", "sega", "microsoft", "adobe", "microsoft office"]
 
 cli_args = None
+
+http_session = requests.Session()  # shared by auth + page downloads (cookie jar)
 
 def parse_args():
 	global cli_args, verbose
@@ -423,23 +423,20 @@ def check_copyright(title):
 			return True
 	return False
 # ///////////// DISK SPACE LIMIT ///////////////////
+SIZE_RE = re.compile(r'^\s*([0-9]*\.?[0-9]+)\s*(TB|GB|MB|KB|B)\s*$', re.IGNORECASE)
+SIZE_MULTIPLIERS = {
+	'B': 1 / (1024**3),
+	'KB': 1 / (1024**2),
+	'MB': 1 / 1024,
+	'GB': 1,
+	'TB': 1024,
+}
+
 def parse_size_to_gb(size_str):
-	size_str = size_str.strip().upper()
-	multipliers = {
-		'B': 1 / (1024**3),
-		'KB': 1 / (1024**2),
-		'MB': 1 / 1024,
-		'GB': 1,
-		'TB': 1024,
-	}
-	for suffix, mult in multipliers.items():
-		if size_str.endswith(suffix):
-			try:
-				num = float(size_str[:-len(suffix)].strip())
-				return num * mult
-			except ValueError:
-				return None
-	return None
+	m = SIZE_RE.match(size_str.strip())
+	if not m:
+		return None
+	return float(m.group(1)) * SIZE_MULTIPLIERS[m.group(2).upper()]
 
 def parse_peers(row):
 	try:
@@ -540,7 +537,7 @@ def get_waittime():
 
 def check_disk_limit(size_gb):
 	global disk_limit_gb
-	total_size = sum(parse_size_to_gb(s) for s in current_selection_sizes if parse_size_to_gb(s) is not None)
+	total_size = sum(s for s in current_selection_sizes if s is not None)
 	if total_size + size_gb > disk_limit_gb:
 		return False
 	return True
@@ -797,56 +794,66 @@ def normalize_proxy(url):
 		return "http://" + url
 	return url
 
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-	def redirect_request(self, req, fp, code, msg, headers, newurl):
-		from urllib.parse import urlparse, urlunparse
-		parsed = urlparse(newurl)
-		if parsed.hostname and '.b32.i2p' in parsed.hostname:
-			orig = urlparse(postman_url)
-			fixed = urlunparse(parsed._replace(netloc=orig.netloc, scheme=orig.scheme))
-			print_warning(f"Redirect ({code}) to dead .b32.i2p address rewritten to: {fixed}")
-			return urllib.request.Request(fixed, headers=req.headers, method=req.get_method())
-		print_info(f"Following redirect ({code}) to: {newurl}")
-		return urllib.request.Request(newurl, headers=req.headers, method=req.get_method())
+def set_session_proxies():
+	proxy_url = normalize_proxy(http_proxy)
+	http_session.proxies.update({'http': proxy_url, 'https': proxy_url})
 
 def download_page(url, file_name):
+	# Downloads go through the same authenticated requests.Session so cookies
+	# obtained during login apply to page fetches too.
 	proxy_url = normalize_proxy(http_proxy)
 	print_verbose(f"Proxy: {proxy_url}")
 	print_verbose(f"Request: {url}")
-	i2p_proxy = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
-	opener = urllib.request.build_opener(i2p_proxy, NoRedirectHandler)
+	set_session_proxies()
 	try:
 		start_time = time.time()
-		response = opener.open(url, timeout=120)
+		response = http_session.get(url, timeout=120, allow_redirects=False)
+		redirect_count = 0
+		while response.status_code in (301, 302, 303, 307, 308) and redirect_count < 5:
+			redirect_count += 1
+			redirect_url = response.headers.get('Location', '')
+			if not redirect_url:
+				break
+			redirect_url = urllib.parse.urljoin(url, redirect_url)
+			parsed = urllib.parse.urlparse(redirect_url)
+			if parsed.hostname and '.b32.i2p' in parsed.hostname:
+				orig = urllib.parse.urlparse(postman_url)
+				redirect_url = urllib.parse.urlunparse(parsed._replace(netloc=orig.netloc, scheme=orig.scheme))
+				print_warning(f"Redirect ({response.status_code}) to dead .b32.i2p address rewritten to: {redirect_url}")
+			else:
+				print_info(f"Following redirect ({response.status_code}) to: {redirect_url}")
+			response = http_session.get(redirect_url, timeout=120, allow_redirects=False)
 		elapsed = time.time() - start_time
-		print_verbose(f"Response: {response.status} {response.reason} ({elapsed:.1f}s)")
+		print_verbose(f"Response: {response.status_code} {response.reason} ({elapsed:.1f}s)")
 		print_verbose(f"Response headers: {dict(response.headers)}")
+		response.raise_for_status()
 		with open(file_name, 'wb') as f:
-			f.write(response.read())
+			f.write(response.content)
 		return True
-	except urllib.error.HTTPError as e:
+	except requests.exceptions.HTTPError as e:
 		elapsed = time.time() - start_time
-		print_verbose(f"HTTPError after {elapsed:.1f}s: {e.code} {e.reason}")
-		print_verbose(f"Response headers: {dict(e.headers)}")
-		if e.code == 503:
+		code = e.response.status_code if e.response is not None else 0
+		print_verbose(f"HTTPError after {elapsed:.1f}s: {code} {e}")
+		if code == 503:
 			print_error("Server returned 503 - you are being throttled or the tracker is overloaded.")
 			print_error("Try again in a few minutes, or increase your wait time between requests.")
-		elif e.code == 403:
+		elif code == 403:
 			print_error("Access forbidden (403). The tracker may be blocking your request.")
-		elif e.code == 404:
+		elif code == 404:
 			print_error("Page not found (404). Check the tracker URL.")
 		else:
-			print_error(f"HTTP error {e.code}: {e.reason}")
+			print_error(f"HTTP error {code}: {e}")
 		return False
-	except urllib.error.URLError as e:
-		print_error(f"Could not connect to tracker: {e.reason}")
+	except requests.exceptions.ConnectionError as e:
+		print_error(f"Could not connect to tracker: {e}")
 		print_error("Make sure your proxy is running and the URL is correct.")
 		print_verbose(f"Proxy: {proxy_url}, Target: {url}")
 		return False
-	except IOError as e:
+	except requests.exceptions.RequestException as e:
 		print_error(f"Network error: {e}")
 		print_verbose(f"Proxy: {proxy_url}, Target: {url}")
 		return False
+
 def authenticate_form_token():
 	global token
 	global http_proxy
@@ -855,8 +862,7 @@ def authenticate_form_token():
 		"https" : normalize_proxy(http_proxy),
 	}
 	print_verbose(f"Session proxies: {proxies}")
-	session = requests.Session()
-	session.proxies = proxies
+	http_session.proxies.update(proxies)
 	print_info("---> Getting form token... ")
 	print_info(f"Downloading landing page from: {postman_url}")
 	if not download_page(postman_url, "lander.html"):
@@ -882,7 +888,7 @@ def authenticate_form_token():
 
 					print_verbose(f"Token POST: {url_tok}")
 					start_time = time.time()
-					x = session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
+					x = http_session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
 					print_verbose(f"Token response: {x.status_code} ({time.time() - start_time:.1f}s)")
 					print_verbose(f"Token response headers: {dict(x.headers)}")
 
@@ -900,12 +906,12 @@ def authenticate_form_token():
 							url_tok = urlunparse(parsed._replace(netloc=orig.netloc, scheme=orig.scheme))
 							print_warning(f"Redirect to dead .b32.i2p rewritten to: {url_tok}")
 							start_time = time.time()
-							x = session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
+							x = http_session.post(url_tok, data = data_tok, timeout=120, allow_redirects=False)
 							print_verbose(f"Retry response: {x.status_code} ({time.time() - start_time:.1f}s)")
 						else:
 							print_info(f"Following redirect ({x.status_code}) to: {redirect_url}")
 							start_time = time.time()
-							x = session.post(redirect_url, data = data_tok, timeout=120, allow_redirects=False)
+							x = http_session.post(redirect_url, data = data_tok, timeout=120, allow_redirects=False)
 							print_verbose(f"Redirect response: {x.status_code} ({time.time() - start_time:.1f}s)")
 					if redirect_count >= max_redirects and x.status_code in (301, 302, 303, 307, 308):
 						print_error(f"Too many redirects ({max_redirects}), giving up.")
@@ -948,129 +954,134 @@ def authenticate_form_token():
 	return True
 def magnets_from_page():
 	global postman_url, torrent_number, to_add, not_add, current_selection_sizes
-	magnets = []
-	titles = []
-	sizes = []
-	danger_flags = []
-	params = urllib.parse.urlencode({
-		'view': f"{view}Tab",
-		'start': torrent_number,
-		'limit': limit,
-		'search': search,
-		'category': selected_category,
-		'orderby': orderby_num,
-		'lastactive': lastactive_num,
-		'lang': language_num
-	})
-	page_url = f"{postman_url}/index.php?{params}"
-	print_info("---> Getting page: " + page_url)
-	if not download_page(page_url, "fetched_page.html"):
-		return
-	page_content = open('fetched_page.html', 'r').read()
-	page_lower = page_content.lower()
-	service_errors = ['service unavailable', 'service temporarily unavailable', 'access denied', 'forbidden', 'not found', 'error', 'no torrents', 'no results']
-	for err in service_errors:
-		if err in page_lower and 'magnet:?xt' not in page_lower:
-			print_error(f"Tracker returned error page: '{err}' detected in response (HTTP 200 but content is an error)")
-			print_error("The tracker may be overloaded, blocking your request, or the session expired.")
-			print_verbose(f"Check fetched_page.html for full response content.")
+	while True:
+		magnets = []
+		titles = []
+		sizes = []
+		size_gbs = []
+		danger_flags = []
+		params = urllib.parse.urlencode({
+			'view': f"{view}Tab",
+			'start': torrent_number,
+			'limit': limit,
+			'search': search,
+			'category': selected_category,
+			'orderby': orderby_num,
+			'lastactive': lastactive_num,
+			'lang': language_num
+		})
+		page_url = f"{postman_url}/index.php?{params}"
+		print_info("---> Getting page: " + page_url)
+		if not download_page(page_url, "fetched_page.html"):
 			return
-	with open(r'fetched_page.html', 'r') as fp:
-		for line_num, row in enumerate(fp):
-			searchstring = ('magnet:?xt')
-			if row.find(searchstring) != -1:
-				magnet_temp = row.split('magnet:')[1].split('&amp')[0]
-				magnet_temp = "magnet:" + magnet_temp
-				if filter_not_wanted and magnet_temp in not_wanted_magnets:
-					print_warning("Skipping previously rejected magnet: " + magnet_temp[:50] + "...")
-					continue
-				print_success('Found magnet on line: ' + str(line_num))
-				print_info("Magnet contents: " + magnet_temp)
-				# get torrent title
-				separator_title = f'<a href="{magnet_temp}&amp;dn='
-				torrent_title = row.split(separator_title)[1].split('&amp')[0]
-				# danger filter check
-				is_danger = False
-				if filter_danger and check_danger(torrent_title):
-					if hands_on_mode:
-						print_error(f"[DANGER] {torrent_title} - CONTINUE? (y/n)")
-						choice = input_blue("Override danger filter? y/n: ").strip().lower()
-						if choice not in ('y', 'yes'):
+		page_content = open('fetched_page.html', 'r').read()
+		page_lower = page_content.lower()
+		service_errors = ['service unavailable', 'service temporarily unavailable', 'access denied', 'forbidden', 'not found', 'error', 'no torrents', 'no results']
+		for err in service_errors:
+			if err in page_lower and 'magnet:?xt' not in page_lower:
+				print_error(f"Tracker returned error page: '{err}' detected in response (HTTP 200 but content is an error)")
+				print_error("The tracker may be overloaded, blocking your request, or the session expired.")
+				print_verbose(f"Check fetched_page.html for full response content.")
+				return
+		with open(r'fetched_page.html', 'r') as fp:
+			for line_num, row in enumerate(fp):
+				searchstring = ('magnet:?xt')
+				if row.find(searchstring) != -1:
+					try:
+						magnet_temp = row.split('magnet:')[1].split('&amp')[0]
+						magnet_temp = "magnet:" + magnet_temp
+						# get torrent title
+						separator_title = f'<a href="{magnet_temp}&amp;dn='
+						torrent_title = row.split(separator_title)[1].split('&amp')[0]
+					except (IndexError, ValueError):
+						print_warning(f"Skipping malformed row (line {line_num}): missing magnet or title.")
+						continue
+					if filter_not_wanted and magnet_temp in not_wanted_magnets:
+						print_warning("Skipping previously rejected magnet: " + magnet_temp[:50] + "...")
+						continue
+					print_success('Found magnet on line: ' + str(line_num))
+					print_info("Magnet contents: " + magnet_temp)
+					# danger filter check
+					is_danger = False
+					if filter_danger and check_danger(torrent_title):
+						if hands_on_mode:
+							print_error(f"[DANGER] {torrent_title} - CONTINUE? (y/n)")
+							choice = input_blue("Override danger filter? y/n: ").strip().lower()
+							if choice not in ('y', 'yes'):
+								not_add.append(magnet_temp)
+								continue
+							is_danger = True
+						else:
+							print_warning(f"Skipping danger-filtered torrent: {torrent_title}")
 							not_add.append(magnet_temp)
 							continue
-						is_danger = True
-					else:
-						print_warning(f"Skipping danger-filtered torrent: {torrent_title}")
+					# copyright filter check
+					if filter_copyright and check_copyright(torrent_title):
+						print_warning(f"Skipping copyrighted torrent: {torrent_title}")
 						not_add.append(magnet_temp)
 						continue
-				# copyright filter check
-				if filter_copyright and check_copyright(torrent_title):
-					print_warning(f"Skipping copyrighted torrent: {torrent_title}")
-					not_add.append(magnet_temp)
-					continue
-				# parse size and peers from row
-				torrent_size_gb = parse_size_from_row(row)
-				seeders, leechers = parse_peers(row)
-				size_str = f"{torrent_size_gb:.2f} GB" if torrent_size_gb else "unknown"
-				seed_str = str(seeders) if seeders is not None else "?"
-				leech_str = str(leechers) if leechers is not None else "?"
-				# skip if no seeders
-				if seeders is not None and seeders == 0:
-					print_warning(f"Skipping torrent with no seeders: {torrent_title}")
-					not_add.append(magnet_temp)
-					continue
-				# disk limit check
-				if filter_disk_limit and torrent_size_gb is not None:
-					if not check_disk_limit(torrent_size_gb):
-						print_warning(f"Skipping torrent (exceeds disk limit): {torrent_title} ({size_str})")
+					# parse size and peers from row
+					torrent_size_gb = parse_size_from_row(row)
+					seeders, leechers = parse_peers(row)
+					size_str = f"{torrent_size_gb:.2f} GB" if torrent_size_gb else "unknown"
+					seed_str = str(seeders) if seeders is not None else "?"
+					leech_str = str(leechers) if leechers is not None else "?"
+					# skip if no seeders
+					if seeders is not None and seeders == 0:
+						print_warning(f"Skipping torrent with no seeders: {torrent_title}")
 						not_add.append(magnet_temp)
 						continue
-				print_info(f"Torrent title: {torrent_title}")
-				print_info(f"  Size: {size_str} | Seeders: {seed_str} | Leechers: {leech_str}")
-				magnets.append(magnet_temp)
-				titles.append(torrent_title)
-				sizes.append(size_str)
-				danger_flags.append(is_danger)
-	if not titles:
-		print_warning("No magnets found on this page.")
-		return
-	# add-all mode or interactive selection
-	if add_all_mode:
-		print_success(f"Adding all {len(magnets)} magnet(s) from this page.")
-		for i, magnet in enumerate(magnets):
-			to_add.append(magnet)
-			current_selection_sizes.append(sizes[i])
-	else:
-		for i, title in enumerate(titles):
-			choice = ""
-			print(f"--> TORRENT TITLE: {title}")
-			print(f"    Size: {sizes[i]}")
-			if danger_flags[i]:
-				print_error("    [DANGER FLAGGED - hands-on override]")
-			while choice.lower() not in ('y', 'n'):
-				choice = input_blue("Add torrent y/n: ")
-				if choice.lower() not in ('y', 'n'):
-					print_error("Input only y or n !!!")
-			if choice.lower() == 'y':
-				print_success("Adding torrent.")
-				to_add.append(magnets[i])
-				current_selection_sizes.append(sizes[i])
-			else:
-				print_warning("Not adding torrent.")
-				not_add.append(magnets[i])
-	# ask about next page
-	next_page = input_blue("View next page? y/n: ")
-	while next_page.lower() not in ('y', 'n'):
+					# disk limit check
+					if filter_disk_limit and torrent_size_gb is not None:
+						if not check_disk_limit(torrent_size_gb):
+							print_warning(f"Skipping torrent (exceeds disk limit): {torrent_title} ({size_str})")
+							not_add.append(magnet_temp)
+							continue
+					print_info(f"Torrent title: {torrent_title}")
+					print_info(f"  Size: {size_str} | Seeders: {seed_str} | Leechers: {leech_str}")
+					magnets.append(magnet_temp)
+					titles.append(torrent_title)
+					sizes.append(size_str)
+					size_gbs.append(torrent_size_gb)
+					danger_flags.append(is_danger)
+		if not titles:
+			print_warning("No magnets found on this page.")
+			return
+		# add-all mode or interactive selection
+		if add_all_mode:
+			print_success(f"Adding all {len(magnets)} magnet(s) from this page.")
+			for i, magnet in enumerate(magnets):
+				to_add.append(magnet)
+				current_selection_sizes.append(size_gbs[i])
+		else:
+			for i, title in enumerate(titles):
+				choice = ""
+				print(f"--> TORRENT TITLE: {title}")
+				print(f"    Size: {sizes[i]}")
+				if danger_flags[i]:
+					print_error("    [DANGER FLAGGED - hands-on override]")
+				while choice.lower() not in ('y', 'n'):
+					choice = input_blue("Add torrent y/n: ")
+					if choice.lower() not in ('y', 'n'):
+						print_error("Input only y or n !!!")
+				if choice.lower() == 'y':
+					print_success("Adding torrent.")
+					to_add.append(magnets[i])
+					current_selection_sizes.append(size_gbs[i])
+				else:
+					print_warning("Not adding torrent.")
+					not_add.append(magnets[i])
+		# ask about next page
 		next_page = input_blue("View next page? y/n: ")
-	if next_page.lower() == 'y':
+		while next_page.lower() not in ('y', 'n'):
+			next_page = input_blue("View next page? y/n: ")
+		if next_page.lower() != 'y':
+			break
 		torrent_number += limit
 		import random
 		wait_time = random.randint(min_waittime, max_waittime)
 		print_info(f"Waiting {wait_time} seconds before next page...")
 		time.sleep(wait_time)
-		magnets_from_page()
-	else:
-		add_to_i2psnark()
 # --------------> getting torrent links (not magnet links)
 # craft URL: postman_url + all the options + page num
 # get one page of results
@@ -1170,7 +1181,15 @@ if __name__ == "__main__":
 		goodbye()
 		sys.exit(1)
 	magnets_from_page()
-	add_to_i2psnark()
+
+	if to_add:
+		with open('selected_magnets.txt', 'w') as f:
+			for magnet in to_add:
+				f.write(magnet + '\n')
+		print_info(f"Saved {len(to_add)} selected magnet(s) to selected_magnets.txt")
+		add_to_i2psnark()
+	else:
+		print_warning("No magnets selected; nothing to add.")
 
 	if cli_args and cli_args.save:
 		settings = {
